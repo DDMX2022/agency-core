@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.js
+!eslint.config.js
+!vitest.config.ts
+memory/logs/
+memory/lessons/
+memory/playbooks/
+memory/portfolio/
+.env
