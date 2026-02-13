@@ -77,14 +77,26 @@ function splitMessage(text: string): string[] {
 }
 
 /**
- * Escape special characters for Telegram MarkdownV2.
+ * Escape special characters for Telegram HTML.
  */
-function escapeMarkdown(text: string): string {
-  return text.replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 /**
- * Format a pipeline result into a readable Telegram message (plain text).
+ * Build a visual score bar: ████░░░░░░ 4/5
+ */
+function scoreBar(score: number, max: number): string {
+  const filled = Math.round((score / max) * 10);
+  const empty = 10 - filled;
+  return "█".repeat(filled) + "░".repeat(empty) + ` ${score}/${max}`;
+}
+
+/**
+ * Format a pipeline result into a beautiful, human-readable Telegram HTML message.
  */
 function formatResult(artifact: Record<string, unknown>): string {
   const gk = artifact["gatekeeper"] as Record<string, unknown> | undefined;
@@ -94,119 +106,157 @@ function formatResult(artifact: Record<string, unknown>): string {
 
   const lines: string[] = [];
 
-  lines.push("✅ Pipeline Complete\n");
+  // ── Header ──
+  lines.push("<b>✅ Pipeline Complete</b>");
+  lines.push("");
 
+  // ── Gatekeeper Score ──
   if (gk) {
-    const score = gk["totalScore"] ?? "?";
-    const feedback = gk["feedback"] ?? "";
-    lines.push(`📊 Score: ${score}/25`);
-    lines.push(`💬 Feedback: ${feedback}\n`);
+    const score = (gk["totalScore"] as number) ?? 0;
+    const feedback = (gk["feedback"] as string) ?? "";
+    lines.push(`<b>📊 Quality Score</b>  ${score}/25`);
+    lines.push(`<code>${scoreBar(score, 25)}</code>`);
+    if (feedback) {
+      lines.push("");
+      lines.push(`💬 ${escapeHtml(feedback)}`);
+    }
+    lines.push("");
   }
 
+  // ── Observer Summary ──
   if (obs) {
     const summary = (obs["summary"] as string) ?? "";
     if (summary) {
-      lines.push(`🔍 Analysis:\n${summary}\n`);
+      lines.push(`<b>🔍 Analysis</b>`);
+      lines.push(escapeHtml(summary));
+      lines.push("");
     }
   }
 
+  // ── Guide Plan ──
   if (guide) {
     const plan = (guide["plan"] as unknown[]) ?? [];
     if (plan.length > 0) {
-      lines.push(`📋 Plan: ${plan.length} steps`);
+      lines.push(`<b>📋 Plan</b>  (${plan.length} steps)`);
       for (const step of plan.slice(0, 5)) {
         const s = step as Record<string, string>;
-        lines.push(`  • ${s["step"] ?? s["description"] ?? JSON.stringify(s)}`);
+        const label = s["action"] ?? s["step"] ?? s["description"] ?? JSON.stringify(s);
+        lines.push(`  → ${escapeHtml(label)}`);
       }
-      if (plan.length > 5) lines.push(`  ... and ${plan.length - 5} more`);
+      if (plan.length > 5) lines.push(`  <i>… and ${plan.length - 5} more</i>`);
       lines.push("");
     }
   }
 
+  // ── Implementor Actions ──
   if (impl) {
     const actions = (impl["actions"] as unknown[]) ?? [];
     if (actions.length > 0) {
-      lines.push(`⚙️ Actions: ${actions.length} performed`);
+      lines.push(`<b>⚙️ Actions</b>  (${actions.length} performed)`);
       for (const action of actions.slice(0, 5)) {
         const a = action as Record<string, string>;
-        lines.push(`  • ${a["description"] ?? a["action"] ?? JSON.stringify(a)}`);
+        const desc = a["description"] ?? a["action"] ?? JSON.stringify(a);
+        lines.push(`  • ${escapeHtml(desc)}`);
       }
-      if (actions.length > 5) lines.push(`  ... and ${actions.length - 5} more`);
+      if (actions.length > 5) lines.push(`  <i>… and ${actions.length - 5} more</i>`);
       lines.push("");
     }
   }
 
-  lines.push(`🆔 ${artifact["runId"]}`);
+  // ── Footer ──
+  lines.push(`<code>Run ${artifact["runId"]}</code>`);
 
   return lines.join("\n");
 }
 
 /**
- * Format an OpenClaw RESULT envelope into a readable Telegram message.
+ * Format an OpenClaw RESULT envelope into a beautiful, human-readable Telegram HTML message.
  */
 function formatOpenClawResult(result: import("../integrations/openclaw/openclaw.schema.js").OpenClawOutbound): string {
   const lines: string[] = [];
   const payload = result.payload as Record<string, unknown>;
   const data = (payload["data"] ?? {}) as Record<string, unknown>;
 
+  // ── Header ──
   if (payload["success"]) {
-    lines.push("✅ OpenClaw Pipeline Complete\n");
+    lines.push("<b>✅ Task Complete</b>");
   } else {
-    lines.push("⚠️ OpenClaw Pipeline Finished (with issues)\n");
+    lines.push("<b>⚠️ Task Finished</b>  <i>(with issues)</i>");
   }
+  lines.push("━━━━━━━━━━━━━━━━━━━━━━");
 
-  // Summary
+  // ── Summary (the main human-readable answer) ──
   const summary = payload["summary"] as string | undefined;
   if (summary) {
-    lines.push(`💬 Summary: ${summary}\n`);
-  }
-
-  // Score
-  const totalScore = data["totalScore"] as number | undefined;
-  if (totalScore !== undefined) {
-    lines.push(`📊 Score: ${totalScore}/25`);
-  }
-
-  // Scorecard
-  const scorecard = data["scorecard"] as Record<string, number> | undefined;
-  if (scorecard) {
-    lines.push(`  Correctness:  ${scorecard["correctness"] ?? "?"}/5`);
-    lines.push(`  Verification: ${scorecard["verification"] ?? "?"}/5`);
-    lines.push(`  Safety:       ${scorecard["safety"] ?? "?"}/5`);
-    lines.push(`  Clarity:      ${scorecard["clarity"] ?? "?"}/5`);
-    lines.push(`  Autonomy:     ${scorecard["autonomy"] ?? "?"}/5`);
+    lines.push("");
+    lines.push(escapeHtml(summary));
     lines.push("");
   }
 
-  // Actions
+  // ── Score ──
+  const totalScore = data["totalScore"] as number | undefined;
+  const scorecard = data["scorecard"] as Record<string, number> | undefined;
+  if (totalScore !== undefined) {
+    lines.push("━━━━━━━━━━━━━━━━━━━━━━");
+    lines.push(`<b>📊 Quality</b>  ${totalScore}/25`);
+    lines.push(`<code>${scoreBar(totalScore, 25)}</code>`);
+  }
+
+  // ── Scorecard Breakdown ──
+  if (scorecard) {
+    lines.push("");
+    const dims = [
+      ["Correctness ", "correctness"],
+      ["Verification", "verification"],
+      ["Safety      ", "safety"],
+      ["Clarity     ", "clarity"],
+      ["Autonomy    ", "autonomy"],
+    ] as const;
+    for (const [label, key] of dims) {
+      const val = scorecard[key] ?? 0;
+      lines.push(`<code>  ${label} ${scoreBar(val, 5)}</code>`);
+    }
+    lines.push("");
+  }
+
+  // ── Actions ──
   const actions = data["actions"] as unknown[] | undefined;
   if (actions && actions.length > 0) {
-    lines.push(`⚙️ Actions: ${actions.length} performed`);
+    lines.push(`<b>⚙️ Actions</b>  (${actions.length})`);
     for (const action of actions.slice(0, 5)) {
       const a = action as Record<string, string>;
-      lines.push(`  • ${a["description"] ?? a["action"] ?? JSON.stringify(a)}`);
+      const desc = a["description"] ?? a["action"] ?? JSON.stringify(a);
+      lines.push(`  • ${escapeHtml(desc)}`);
     }
-    if (actions.length > 5) lines.push(`  ... and ${actions.length - 5} more`);
+    if (actions.length > 5) lines.push(`  <i>… and ${actions.length - 5} more</i>`);
     lines.push("");
   }
 
-  // Files
+  // ── Files ──
   const filesCreated = data["filesCreated"] as string[] | undefined;
   const filesModified = data["filesModified"] as string[] | undefined;
-  if (filesCreated && filesCreated.length > 0) {
-    lines.push(`📄 Files created: ${filesCreated.join(", ")}`);
-  }
-  if (filesModified && filesModified.length > 0) {
-    lines.push(`✏️ Files modified: ${filesModified.join(", ")}`);
+  const hasFiles = (filesCreated && filesCreated.length > 0) || (filesModified && filesModified.length > 0);
+  if (hasFiles) {
+    lines.push("<b>� Files</b>");
+    if (filesCreated && filesCreated.length > 0) {
+      for (const f of filesCreated.slice(0, 5)) {
+        lines.push(`  ＋ <code>${escapeHtml(f)}</code>`);
+      }
+      if (filesCreated.length > 5) lines.push(`  <i>… and ${filesCreated.length - 5} more</i>`);
+    }
+    if (filesModified && filesModified.length > 0) {
+      for (const f of filesModified.slice(0, 5)) {
+        lines.push(`  ✎ <code>${escapeHtml(f)}</code>`);
+      }
+      if (filesModified.length > 5) lines.push(`  <i>… and ${filesModified.length - 5} more</i>`);
+    }
+    lines.push("");
   }
 
-  // Envelope metadata
-  lines.push("");
-  lines.push(`📨 Envelope: ${result.from} → ${result.to}`);
-  lines.push(`🆔 Run: ${result.runId}`);
-  if (payload["artifactId"]) {
-    lines.push(`📦 Artifact: ${payload["artifactId"]}`);
-  }
+  // ── Footer ──
+  lines.push("<code>━━━━━━━━━━━━━━━━━━━━━━</code>");
+  const shortRunId = result.runId.split("-")[0] ?? result.runId;
+  lines.push(`<i>🆔 ${shortRunId}  ·  📨 ${escapeHtml(result.from)} → ${escapeHtml(result.to)}</i>`);
 
   return lines.join("\n");
 }
@@ -226,29 +276,43 @@ bot.use(async (ctx, next) => {
 
 // ── /start command ─────────────────────────────────────────────────
 bot.command("start", async (ctx) => {
+  const name = ctx.from?.first_name ?? "there";
   await ctx.reply(
-    `🤖 AgencyCore Bot (OpenClaw-integrated)\n\n` +
-      `Provider: ${llm.name}\n\n` +
-      `Send me any request and I'll run it through the OpenClaw envelope protocol → 11-agent pipeline:\n\n` +
-      `TASK Envelope → Observer → PatternObserver → CruxFinder → Retriever → Guide → Planner → SafetyGuard → Implementor → ToolRunner → Gatekeeper → Learner → RESULT Envelope\n\n` +
-      `Commands:\n` +
-      `/start – This help message\n` +
-      `/health – Check system status\n` +
-      `/approvals – List pending approvals\n` +
-      `/id – Get your Telegram user ID\n\n` +
-      `Just type your request as a normal message!`
+    `<b>👋 Hey ${escapeHtml(name)}!</b>\n\n` +
+      `I'm <b>AgencyCore</b> — your AI agency runtime.\n\n` +
+      `Just send me any task and I'll run it through an <b>11-agent pipeline</b> powered by <b>${escapeHtml(llm.name)}</b>:\n\n` +
+      `<code>You → Observer → Pattern → Crux → Retriever\n` +
+      `→ Guide → Planner → Safety → Implementor\n` +
+      `→ ToolRunner → Gatekeeper → Learner → You</code>\n\n` +
+      `<b>Commands</b>\n` +
+      `/start  — This message\n` +
+      `/health — System status\n` +
+      `/approvals — Pending actions\n` +
+      `/id — Your Telegram ID\n\n` +
+      `<i>Just type your request to get started! 🚀</i>`,
+    { parse_mode: "HTML" }
   );
 });
 
 // ── /health command ────────────────────────────────────────────────
 bot.command("health", async (ctx) => {
   const pending = adapter.listPendingApprovals();
+  const uptime = process.uptime();
+  const hrs = Math.floor(uptime / 3600);
+  const mins = Math.floor((uptime % 3600) / 60);
+  const uptimeStr = hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
+
   await ctx.reply(
-    `🟢 System Status\n\n` +
-      `Provider: ${llm.name}\n` +
-      `OpenClaw: Integrated\n` +
-      `Pending Approvals: ${pending.length}\n` +
-      `Time: ${new Date().toISOString()}`
+    `<b>🟢 System Status</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `<b>Engine</b>    ${escapeHtml(llm.name)}\n` +
+      `<b>OpenClaw</b>  ✅ Integrated\n` +
+      `<b>Agents</b>    11 active\n` +
+      `<b>Approvals</b> ${pending.length} pending\n` +
+      `<b>Uptime</b>    ${uptimeStr}\n\n` +
+      `<code>━━━━━━━━━━━━━━━━━━━━━━</code>\n` +
+      `<i>${new Date().toLocaleString()}</i>`,
+    { parse_mode: "HTML" }
   );
 });
 
@@ -262,23 +326,23 @@ bot.command("approvals", async (ctx) => {
   const pending = adapter.listPendingApprovals();
 
   if (pending.length === 0) {
-    await ctx.reply("✅ No pending approvals.");
+    await ctx.reply("✅ No pending approvals — you're all clear!", { parse_mode: "HTML" });
     return;
   }
+
+  await ctx.reply(`<b>🔔 ${pending.length} Pending Approval${pending.length > 1 ? "s" : ""}</b>`, { parse_mode: "HTML" });
 
   for (const approval of pending) {
     const keyboard = new InlineKeyboard()
       .text("✅ Approve", `approve:${approval.runId}`)
       .text("❌ Reject", `reject:${approval.runId}`);
 
+    const shortId = approval.runId.split("-")[0] ?? approval.runId;
     await ctx.reply(
-      `🔔 Pending Approval\n\n` +
-        `Action: ${approval.action}\n` +
-        `Description: ${approval.description}\n` +
-        `From: ${approval.from}\n` +
-        `Run ID: ${approval.runId}\n` +
-        `Created: ${approval.createdAt}`,
-      { reply_markup: keyboard }
+      `<b>📋 ${escapeHtml(approval.action)}</b>\n\n` +
+        `${escapeHtml(approval.description)}\n\n` +
+        `<i>From: ${escapeHtml(approval.from)}  ·  🆔 ${shortId}</i>`,
+      { reply_markup: keyboard, parse_mode: "HTML" }
     );
   }
 });
@@ -306,12 +370,15 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.answerCallbackQuery({
         text: approved ? "✅ Approved!" : "❌ Rejected!",
       });
+      const shortId = runId.split("-")[0] ?? runId;
       await ctx.editMessageText(
-        `${approved ? "✅" : "❌"} ${approved ? "Approved" : "Rejected"} by ${userName}\n\nRun ID: ${runId}`
+        `${approved ? "✅" : "❌"} <b>${approved ? "Approved" : "Rejected"}</b> by ${escapeHtml(userName)}\n\n` +
+          `<i>🆔 ${shortId}</i>`,
+        { parse_mode: "HTML" }
       );
     } else {
       await ctx.answerCallbackQuery({
-        text: "⚠️ Approval not found (may have already been resolved)",
+        text: "⚠️ Already resolved",
       });
     }
   }
@@ -330,7 +397,7 @@ bot.on("message:text", async (ctx) => {
 
   // Prevent double-processing
   if (activeRequests.has(userId)) {
-    await ctx.reply("⏳ Your previous request is still processing. Please wait.");
+    await ctx.reply("<i>⏳ Still working on your last request…</i>", { parse_mode: "HTML" });
     return;
   }
 
@@ -339,7 +406,7 @@ bot.on("message:text", async (ctx) => {
 
   // Send "typing" indicator and a processing message
   await ctx.replyWithChatAction("typing");
-  const statusMsg = await ctx.reply("⏳ Running OpenClaw pipeline... this may take a moment.");
+  const statusMsg = await ctx.reply("🧠 <i>Thinking… running 11 agents on your request.</i>", { parse_mode: "HTML" });
 
   try {
     // Build an OpenClaw TASK envelope from the Telegram message
@@ -377,7 +444,7 @@ bot.on("message:text", async (ctx) => {
     const response = formatOpenClawResult(result);
     const chunks = splitMessage(response);
     for (const chunk of chunks) {
-      await ctx.reply(chunk);
+      await ctx.reply(chunk, { parse_mode: "HTML" });
     }
 
     // If the pipeline flagged any actions needing approval, show inline buttons
@@ -387,12 +454,13 @@ bot.on("message:text", async (ctx) => {
         .text("✅ Approve", `approve:${approval.runId}`)
         .text("❌ Reject", `reject:${approval.runId}`);
 
+      const shortId = approval.runId.split("-")[0] ?? approval.runId;
       await ctx.reply(
-        `🔔 Approval Required\n\n` +
-          `Action: ${approval.action}\n` +
-          `Description: ${approval.description}\n` +
-          `Run ID: ${approval.runId}`,
-        { reply_markup: keyboard }
+        `<b>🔔 Approval Required</b>\n\n` +
+          `<b>${escapeHtml(approval.action)}</b>\n` +
+          `${escapeHtml(approval.description)}\n\n` +
+          `<i>🆔 ${shortId}</i>`,
+        { reply_markup: keyboard, parse_mode: "HTML" }
       );
     }
 
@@ -407,7 +475,12 @@ bot.on("message:text", async (ctx) => {
       // Ignore
     }
 
-    await ctx.reply(`❌ Pipeline Error\n\n${message}`);
+    await ctx.reply(
+      `<b>❌ Something went wrong</b>\n\n` +
+        `<code>${escapeHtml(message)}</code>\n\n` +
+        `<i>Try again or rephrase your request.</i>`,
+      { parse_mode: "HTML" }
+    );
   } finally {
     activeRequests.delete(userId);
   }
@@ -438,4 +511,4 @@ main().catch((err) => {
   process.exit(1);
 });
 
-export { bot, orchestrator, adapter, formatResult, formatOpenClawResult, splitMessage };
+export { bot, orchestrator, adapter, formatResult, formatOpenClawResult, splitMessage, escapeHtml, scoreBar };
