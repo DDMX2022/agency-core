@@ -53,6 +53,20 @@ const bot = new Bot(TOKEN);
 // Track active requests to prevent double-processing
 const activeRequests = new Set<number>();
 
+// Cache original text for rerun buttons (Telegram callback data has 64-byte limit)
+let rerunCounter = 0;
+const rerunCache = new Map<string, string>();
+function storeRerunText(text: string): string {
+  const id = `r${++rerunCounter}`;
+  rerunCache.set(id, text);
+  // Keep cache bounded (max 200 entries)
+  if (rerunCache.size > 200) {
+    const oldest = rerunCache.keys().next().value;
+    if (oldest) rerunCache.delete(oldest);
+  }
+  return id;
+}
+
 /**
  * Split a long message into Telegram-safe chunks.
  */
@@ -589,12 +603,58 @@ bot.on("callback_query:data", async (ctx) => {
 
   // ── Rerun request ───────────────────────────────────────────────
   if (data.startsWith("rerun:")) {
-    const originalText = decodeURIComponent(data.slice(6));
+    const rerunId = data.slice(6);
+    const originalText = rerunCache.get(rerunId);
+    if (!originalText) {
+      await ctx.answerCallbackQuery({ text: "⚠️ Request expired, please send again" });
+      return;
+    }
+
     await ctx.answerCallbackQuery({ text: "🔄 Re-running…" });
-    // Simulate a new text message by triggering the pipeline
-    await ctx.reply(`🔄 <i>Re-running: "${escapeHtml(originalText)}"</i>`, { parse_mode: "HTML" });
-    // We can't easily re-trigger the message handler, so instruct the user
-    await ctx.reply(`<i>Send the same request again to re-run the pipeline.</i>`, { parse_mode: "HTML" });
+    const statusMsg = await ctx.reply(`🔄 <i>Re-running: "${escapeHtml(originalText.slice(0, 80))}"</i>\n\n🧠 <i>Running 11 agents…</i>`, { parse_mode: "HTML" });
+
+    try {
+      const envelope: OpenClawInbound = {
+        type: "TASK",
+        runId: uuidv4(),
+        from: `telegram-user-${ctx.from.id}`,
+        to: "AgencyCore",
+        topic: "telegram-rerun",
+        payload: {
+          request: originalText,
+          priority: "medium",
+          metadata: { source: "telegram-rerun", userId: ctx.from.id },
+        },
+        requiresApproval: false,
+        timestamp: new Date().toISOString(),
+      };
+
+      const result = await adapter.handleMessage(envelope);
+
+      try { if (ctx.chat) await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch { /* ignore */ }
+
+      const response = formatOpenClawResult(result);
+      const chunks = splitMessage(response);
+      for (let i = 0; i < chunks.length; i++) {
+        const isLastChunk = i === chunks.length - 1;
+        if (isLastChunk) {
+          const newRerunId = storeRerunText(originalText);
+          const kb = new InlineKeyboard()
+            .text("🔄 Run Again", `rerun:${newRerunId}`)
+            .text("🧬 Self-Improve", "trigger_improve")
+            .row()
+            .text("📊 Score Details", `details:${result.runId}`)
+            .text("❤️ Helpful", `feedback:good:${result.runId}`)
+            .text("👎 Not Helpful", `feedback:bad:${result.runId}`);
+          await ctx.reply(chunks[i]!, { parse_mode: "HTML", reply_markup: kb });
+        } else {
+          await ctx.reply(chunks[i]!, { parse_mode: "HTML" });
+        }
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      await ctx.reply(`<b>❌ Rerun Failed</b>\n\n<code>${escapeHtml(msg)}</code>`, { parse_mode: "HTML" });
+    }
     return;
   }
 
@@ -733,13 +793,13 @@ bot.on("message:text", async (ctx) => {
       const isLastChunk = i === chunks.length - 1;
       if (isLastChunk) {
         // Attach action buttons to the last chunk
+        const rerunId = storeRerunText(text);
         const actionKeyboard = new InlineKeyboard()
-          .text("🔄 Run Again", `rerun:${encodeURIComponent(text.slice(0, 60))}`)
+          .text("🔄 Run Again", `rerun:${rerunId}`)
           .text("🧬 Self-Improve", "trigger_improve")
           .row()
           .text("📊 Score Details", `details:${result.runId}`)
-          .text("❤️ Helpful", `feedback:good:${result.runId}`)
-          .text("👎 Not Helpful", `feedback:bad:${result.runId}`);
+          .text("❤️ Helpful", `feedback:good:${result.runId}`)          .text("👎 Not Helpful", `feedback:bad:${result.runId}`);
         await ctx.reply(chunks[i]!, { parse_mode: "HTML", reply_markup: actionKeyboard });
       } else {
         await ctx.reply(chunks[i]!, { parse_mode: "HTML" });
