@@ -1,6 +1,7 @@
+import "dotenv/config";
 import Fastify from "fastify";
 import { Orchestrator } from "../core/pipeline/orchestrator.js";
-import { MockLLM } from "../providers/mock-llm.js";
+import { createLLMProvider } from "../providers/index.js";
 import { registerOpenClawRoutes } from "../integrations/openclaw/openclawRoutes.js";
 import { ProductScaffolder } from "../core/products/productScaffolder.js";
 import type { ScaffoldRequest } from "../core/products/product.schema.js";
@@ -12,8 +13,9 @@ const WORKSPACE_ROOT = process.cwd();
 export function buildServer() {
   const fastify = Fastify({ logger: true });
 
+  const llm = createLLMProvider();
   const orchestrator = new Orchestrator({
-    llm: new MockLLM(),
+    llm,
     memoryDir: MEMORY_DIR,
     workspaceRoot: WORKSPACE_ROOT,
   });
@@ -68,7 +70,7 @@ export function buildServer() {
 
   // ── Health check ──────────────────────────────────────────────────
   fastify.get("/health", async () => {
-    return { status: "ok", provider: "MockLLM", timestamp: new Date().toISOString() };
+    return { status: "ok", provider: llm.name, timestamp: new Date().toISOString() };
   });
 
   // ── OpenClaw Integration Routes ─────────────────────────────────────

@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { buildServer } from "./app.js";
 
 const PORT = parseInt(process.env["PORT"] ?? "3100", 10);
@@ -13,6 +14,7 @@ async function main(): Promise<void> {
     console.log(`   POST /run to execute the pipeline`);
     console.log(`   POST /integrations/openclaw/message`);
     console.log(`   POST /products/scaffold`);
+    console.log(`   Telegram: pnpm bot:telegram`);
   } catch (err) {
     server.log.error(err);
     process.exit(1);

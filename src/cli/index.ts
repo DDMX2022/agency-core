@@ -1,6 +1,7 @@
+import "dotenv/config";
 import * as path from "node:path";
 import { Orchestrator } from "../core/pipeline/orchestrator.js";
-import { MockLLM } from "../providers/mock-llm.js";
+import { createLLMProvider } from "../providers/index.js";
 
 const MEMORY_DIR = path.resolve(process.cwd(), "memory");
 const WORKSPACE_ROOT = process.cwd();
@@ -13,14 +14,17 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const llm = createLLMProvider();
+
   console.log("═══════════════════════════════════════════════════════");
   console.log("  AgencyCore Pipeline");
   console.log("═══════════════════════════════════════════════════════");
+  console.log(`  Provider: ${llm.name}`);
   console.log(`  Request: ${request}`);
   console.log("───────────────────────────────────────────────────────\n");
 
   const orchestrator = new Orchestrator({
-    llm: new MockLLM(),
+    llm,
     memoryDir: MEMORY_DIR,
     workspaceRoot: WORKSPACE_ROOT,
   });
