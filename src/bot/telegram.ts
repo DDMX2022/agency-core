@@ -584,6 +584,89 @@ bot.on("callback_query:data", async (ctx) => {
         text: "⚠️ Already resolved",
       });
     }
+    return;
+  }
+
+  // ── Rerun request ───────────────────────────────────────────────
+  if (data.startsWith("rerun:")) {
+    const originalText = decodeURIComponent(data.slice(6));
+    await ctx.answerCallbackQuery({ text: "🔄 Re-running…" });
+    // Simulate a new text message by triggering the pipeline
+    await ctx.reply(`🔄 <i>Re-running: "${escapeHtml(originalText)}"</i>`, { parse_mode: "HTML" });
+    // We can't easily re-trigger the message handler, so instruct the user
+    await ctx.reply(`<i>Send the same request again to re-run the pipeline.</i>`, { parse_mode: "HTML" });
+    return;
+  }
+
+  // ── Trigger self-improvement ────────────────────────────────────
+  if (data === "trigger_improve") {
+    await ctx.answerCallbackQuery({ text: "🧬 Use /improve to start" });
+    await ctx.reply("<i>Send</i> /improve <i>to start a self-improvement cycle.</i>", { parse_mode: "HTML" });
+    return;
+  }
+
+  // ── Score details ───────────────────────────────────────────────
+  if (data.startsWith("details:")) {
+    const runId = data.slice(8);
+    await ctx.answerCallbackQuery({ text: "📊 Loading details…" });
+    try {
+      const logPath = `${WORKSPACE_ROOT}/memory/logs/${runId}.json`;
+      const raw = await import("node:fs/promises").then((fs) => fs.readFile(logPath, "utf-8"));
+      const artifact = JSON.parse(raw) as Record<string, unknown>;
+      const gk = (artifact["gatekeeper"] ?? {}) as Record<string, unknown>;
+      const sc = (gk["scorecard"] ?? {}) as Record<string, number>;
+      const feedback = (gk["feedback"] ?? "") as string;
+      const improvements = (gk["improvements"] ?? []) as string[];
+
+      const lines: string[] = [];
+      lines.push("<b>📊 Score Details</b>");
+      lines.push("━━━━━━━━━━━━━━━━━━━━━━");
+      lines.push("");
+
+      const dims = [
+        ["Correctness ", "correctness"],
+        ["Verification", "verification"],
+        ["Safety      ", "safety"],
+        ["Clarity     ", "clarity"],
+        ["Autonomy    ", "autonomy"],
+      ] as const;
+      for (const [label, key] of dims) {
+        const val = sc[key] ?? 0;
+        lines.push(`<code>  ${label} ${scoreBar(val, 5)}</code>`);
+      }
+      lines.push("");
+
+      if (feedback) {
+        lines.push(`<b>💬 Feedback:</b> ${escapeHtml(feedback)}`);
+        lines.push("");
+      }
+
+      if (improvements.length > 0) {
+        lines.push("<b>💡 Improvements:</b>");
+        for (const imp of improvements) {
+          lines.push(`  • ${escapeHtml(imp)}`);
+        }
+      }
+
+      const shortId = runId.split("-")[0] ?? runId;
+      lines.push("");
+      lines.push(`<i>🆔 ${shortId}</i>`);
+
+      await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+    } catch {
+      await ctx.reply("<i>Could not load details for this run.</i>", { parse_mode: "HTML" });
+    }
+    return;
+  }
+
+  // ── Feedback ────────────────────────────────────────────────────
+  if (data.startsWith("feedback:")) {
+    const parts = data.split(":");
+    const sentiment = parts[1]; // "good" or "bad"
+    await ctx.answerCallbackQuery({
+      text: sentiment === "good" ? "❤️ Thanks for the feedback!" : "👎 Noted — we'll improve!",
+    });
+    return;
   }
 });
 
@@ -646,8 +729,21 @@ bot.on("message:text", async (ctx) => {
     // Format and send the RESULT envelope as a readable message
     const response = formatOpenClawResult(result);
     const chunks = splitMessage(response);
-    for (const chunk of chunks) {
-      await ctx.reply(chunk, { parse_mode: "HTML" });
+    for (let i = 0; i < chunks.length; i++) {
+      const isLastChunk = i === chunks.length - 1;
+      if (isLastChunk) {
+        // Attach action buttons to the last chunk
+        const actionKeyboard = new InlineKeyboard()
+          .text("🔄 Run Again", `rerun:${encodeURIComponent(text.slice(0, 60))}`)
+          .text("🧬 Self-Improve", "trigger_improve")
+          .row()
+          .text("📊 Score Details", `details:${result.runId}`)
+          .text("❤️ Helpful", `feedback:good:${result.runId}`)
+          .text("👎 Not Helpful", `feedback:bad:${result.runId}`);
+        await ctx.reply(chunks[i]!, { parse_mode: "HTML", reply_markup: actionKeyboard });
+      } else {
+        await ctx.reply(chunks[i]!, { parse_mode: "HTML" });
+      }
     }
 
     // If the pipeline flagged any actions needing approval, show inline buttons

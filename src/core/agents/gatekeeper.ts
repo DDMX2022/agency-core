@@ -4,7 +4,7 @@ import type { MemoryManager } from "../memory/index.js";
 
 /**
  * Gatekeeper (Evaluator) Agent
- * Scores the pipeline run, decides on lesson approval, promotion, and cloning.
+ * Uses the LLM to score the pipeline run on 5 quality dimensions (0-5 each).
  * ONLY the Gatekeeper can approve lessons and promotions.
  */
 export class Gatekeeper {
@@ -19,17 +19,8 @@ export class Gatekeeper {
       throw new Error("Gatekeeper requires Implementor output in context");
     }
 
-    await this.llm.generate(
-      "Gatekeeper: Evaluate the implementation quality and safety.",
-      JSON.stringify({
-        actions: impl.actions.length,
-        blocked: impl.blocked.length,
-        filesCreated: impl.filesCreated.length,
-      }),
-    );
-
-    // Deterministic scoring based on outputs
-    const scorecard = this.computeScorecard(context);
+    // ── LLM-based scoring ──────────────────────────────────────────
+    const scorecard = await this.llmScorecard(context);
     const totalScore =
       scorecard.correctness +
       scorecard.verification +
@@ -77,29 +68,83 @@ export class Gatekeeper {
     };
   }
 
-  private computeScorecard(context: PipelineContext): Scorecard {
+  /**
+   * Ask the LLM to evaluate the pipeline output across 5 dimensions.
+   * Returns a Scorecard with integer scores 0-5 per dimension.
+   */
+  private async llmScorecard(context: PipelineContext): Promise<Scorecard> {
     const impl = context.implementor!;
     const guide = context.guide;
+    const obs = context.observer;
+    const crux = context.cruxFinder;
+    const safety = context.safetyGuard;
 
-    // Correctness: based on how many actions succeeded
+    const prompt = `You are a strict quality evaluator for an AI coding agent pipeline.
+
+Given the user request and the pipeline output below, score each dimension from 0 to 5.
+
+DIMENSIONS:
+- correctness: Does the output correctly solve the user's request? Are the generated files/actions appropriate and complete?
+- verification: Were proper planning and validation steps taken? Is there a clear plan that was followed?
+- safety: Were dangerous operations avoided? Were permissions respected? Were safety concerns handled?
+- clarity: Is the output well-explained? Are file names meaningful? Is the explanation helpful?
+- autonomy: Did the system work independently and efficiently? Did it complete all necessary steps?
+
+USER REQUEST: "${context.request}"
+
+OBSERVER SUMMARY: ${obs ? obs.summary : "N/A"}
+CORE PROBLEM: ${crux ? crux.coreProblem : "N/A"}
+SUB-PROBLEMS: ${crux ? crux.subProblems.join(", ") : "N/A"}
+PLAN STEPS: ${guide ? guide.plan.map((s) => s.action).join(" → ") : "N/A"}
+SAFETY RISKS: ${safety ? safety.risks.join(", ") || "None" : "N/A"}
+ACTIONS PROPOSED: ${impl.actions.length}
+ACTIONS BLOCKED: ${impl.blocked.length} ${impl.blocked.length > 0 ? `(${impl.blocked.join("; ")})` : ""}
+FILES CREATED: ${impl.filesCreated.length > 0 ? impl.filesCreated.join(", ") : "None"}
+EXPLANATION: ${impl.explanation}
+
+Reply with ONLY a JSON object, no markdown fences, no explanation:
+{"correctness":N,"verification":N,"safety":N,"clarity":N,"autonomy":N}
+
+Each value must be an integer 0-5. Be honest and varied — not every run deserves the same score.`;
+
+    try {
+      const raw = await this.llm.generate(
+        prompt,
+        "Evaluate the pipeline run and return JSON scores.",
+      );
+
+      // Extract JSON from response (handle potential markdown fences)
+      const jsonStr = raw.replace(/```json?\s*/g, "").replace(/```/g, "").trim();
+      const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
+
+      return {
+        correctness: clampScore(parsed["correctness"]),
+        verification: clampScore(parsed["verification"]),
+        safety: clampScore(parsed["safety"]),
+        clarity: clampScore(parsed["clarity"]),
+        autonomy: clampScore(parsed["autonomy"]),
+      };
+    } catch {
+      // Fallback: deterministic scoring if LLM fails
+      return this.fallbackScorecard(context);
+    }
+  }
+
+  /** Fallback scoring if LLM evaluation fails. */
+  private fallbackScorecard(context: PipelineContext): Scorecard {
+    const impl = context.implementor!;
+    const guide = context.guide;
     const totalActions = impl.actions.length;
     const blockedCount = impl.blocked.length;
     const successRate = totalActions > 0 ? (totalActions - blockedCount) / totalActions : 0;
-    const correctness = Math.round(successRate * 5);
 
-    // Verification: based on whether a plan existed
-    const verification = guide ? Math.min(guide.plan.length, 5) : 1;
-
-    // Safety: higher if nothing was blocked (means no dangerous actions attempted)
-    const safety = blockedCount === 0 ? 5 : Math.max(1, 5 - blockedCount);
-
-    // Clarity: based on explanation length
-    const clarity = impl.explanation.length > 20 ? 4 : 2;
-
-    // Autonomy: based on how many steps completed without issues
-    const autonomy = Math.min(5, Math.round(successRate * 4) + 1);
-
-    return { correctness, verification, safety, clarity, autonomy };
+    return {
+      correctness: Math.round(successRate * 5),
+      verification: guide ? Math.min(guide.plan.length, 5) : 1,
+      safety: blockedCount === 0 ? 5 : Math.max(1, 5 - blockedCount),
+      clarity: impl.explanation.length > 20 ? 4 : 2,
+      autonomy: Math.min(5, Math.round(successRate * 4) + 1),
+    };
   }
 
   private generateFeedback(scorecard: Scorecard, totalScore: number): string {
@@ -135,11 +180,17 @@ export class Gatekeeper {
       improvements.push("Reduce unnecessary approval requests for safe operations");
     }
 
-    // If SafetyGuard flagged risks, note them
     if (context.safetyGuard && context.safetyGuard.risks.length > 0) {
       improvements.push(`Address ${context.safetyGuard.risks.length} safety risks in plan`);
     }
 
     return improvements;
   }
+}
+
+/** Clamp a value to an integer 0-5. */
+function clampScore(val: unknown): number {
+  const n = typeof val === "number" ? val : Number(val);
+  if (isNaN(n)) return 2;
+  return Math.max(0, Math.min(5, Math.round(n)));
 }
