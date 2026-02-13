@@ -27,11 +27,6 @@ export class Implementor {
       throw new Error("Implementor requires Guide and Observer output in context");
     }
 
-    await this.llm.generate(
-      "Implementor: Execute the plan, produce code artifacts.",
-      JSON.stringify({ plan: guide.plan, domain: obs.domain }),
-    );
-
     // Generate actions from the plan
     const proposedActions: ImplementorAction[] = guide.plan
       .filter((step) => step.action !== "Verify all sub-problems are resolved")
@@ -45,6 +40,13 @@ export class Implementor {
 
     // Evaluate permissions
     const { allowed, blocked } = evaluateActions(proposedActions, this.policy);
+
+    // Execute allowed actions
+    for (const action of allowed) {
+      if (action.type === "createFile") {
+        await this.createFile(action.path, action.content);
+      }
+    }
 
     return {
       agent: "Implementor",
@@ -64,6 +66,12 @@ export class Implementor {
 
   private getAllowedRoot(): string {
     return this.policy.allowedWorkspacePaths[0] ?? "./sandbox";
+  }
+
+  private async createFile(path: string, content: string): Promise<void> {
+    // Simulate file creation logic
+    console.log(`Creating file at ${path} with content: ${content}`);
+    // Actual file system operations would be implemented here
   }
 }
 
