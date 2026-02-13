@@ -394,7 +394,7 @@ bot.command("improve", async (ctx) => {
       "<code>1. Analyze portfolio → find weak scores\n" +
       "2. Generate code patches via LLM\n" +
       "3. Run tests → validate changes\n" +
-      "4. Push to GitHub if tests pass</code>\n\n" +
+      "4. Await YOUR approval before pushing</code>\n\n" +
       "<i>This may take a minute…</i>",
     { parse_mode: "HTML" },
   );
@@ -405,7 +405,10 @@ bot.command("improve", async (ctx) => {
 
     const lines: string[] = [];
 
-    if (result.success) {
+    // Header
+    if (result.pendingApproval) {
+      lines.push("<b>⏳ Improvements Ready — Awaiting Approval</b>");
+    } else if (result.success) {
       lines.push("<b>✅ Self-Improvement Complete</b>");
     } else {
       lines.push("<b>⚠️ Self-Improvement Cycle Finished</b>");
@@ -451,25 +454,31 @@ bot.command("improve", async (ctx) => {
       lines.push("");
     }
 
-    // Git
-    if (result.git) {
-      if (result.git.success) {
-        lines.push(`<b>🚀 Pushed</b>  <code>${result.git.commitHash}</code>`);
-        lines.push(`  Branch: <code>${escapeHtml(result.git.branch)}</code>`);
-      } else {
-        lines.push(`<b>❌ Git</b>  ${escapeHtml(result.git.error ?? "push failed")}`);
-      }
-      lines.push("");
-    }
-
     // Summary
     lines.push("<code>━━━━━━━━━━━━━━━━━━━━━━</code>");
     lines.push(`<i>${escapeHtml(result.summary.split("\n")[0] ?? "Done")}</i>`);
 
     const responseText = lines.join("\n");
-    const chunks = splitMessage(responseText);
-    for (const chunk of chunks) {
-      await ctx.reply(chunk, { parse_mode: "HTML" });
+
+    // If pending approval → show approve / reject buttons
+    if (result.pendingApproval) {
+      await ctx.reply(responseText, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "✅ Approve Push", callback_data: "improve_approve" },
+              { text: "❌ Reject & Revert", callback_data: "improve_reject" },
+            ],
+          ],
+        },
+      });
+    } else {
+      // No approval needed (no patches, dry-run, or test failure)
+      const chunks = splitMessage(responseText);
+      for (const chunk of chunks) {
+        await ctx.reply(chunk, { parse_mode: "HTML" });
+      }
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -485,6 +494,67 @@ bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
   const userName = ctx.from.first_name ?? `user-${ctx.from.id}`;
 
+  // ── Self-Improvement push approval ──────────────────────────────
+  if (data === "improve_approve") {
+    if (!improvementLoop.hasPendingApproval()) {
+      await ctx.answerCallbackQuery({ text: "⚠️ No pending improvements" });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: "✅ Pushing to GitHub…" });
+    await ctx.editMessageText(
+      "<b>🚀 Push approved!</b>\n\n<i>Committing and pushing to GitHub…</i>",
+      { parse_mode: "HTML" },
+    );
+
+    try {
+      const pushResult = await improvementLoop.approvePush();
+
+      const lines: string[] = [];
+      if (pushResult.success && pushResult.git) {
+        lines.push("<b>✅ Pushed to GitHub</b>");
+        lines.push("━━━━━━━━━━━━━━━━━━━━━━");
+        lines.push(`<b>🔗 Commit:</b> <code>${pushResult.git.commitHash}</code>`);
+        lines.push(`<b>🌿 Branch:</b> <code>${escapeHtml(pushResult.git.branch)}</code>`);
+        lines.push(`<b>📦 Patches:</b> ${pushResult.patches.length}`);
+        lines.push(`<b>✅ Tests:</b> ${pushResult.validation?.totalTests ?? 0} passing`);
+      } else {
+        lines.push("<b>❌ Push Failed</b>");
+        lines.push(`<i>${escapeHtml(pushResult.summary)}</i>`);
+      }
+
+      await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      await ctx.reply(`<b>❌ Push Failed</b>\n\n<code>${escapeHtml(msg)}</code>`, { parse_mode: "HTML" });
+    }
+    return;
+  }
+
+  if (data === "improve_reject") {
+    if (!improvementLoop.hasPendingApproval()) {
+      await ctx.answerCallbackQuery({ text: "⚠️ No pending improvements" });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: "❌ Reverting changes…" });
+
+    try {
+      const rejectResult = await improvementLoop.rejectPush();
+      await ctx.editMessageText(
+        "<b>🚫 Push Rejected</b>\n\n" +
+          `<i>${escapeHtml(rejectResult.summary)}</i>\n\n` +
+          "All patched files have been reverted to their originals.",
+        { parse_mode: "HTML" },
+      );
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      await ctx.reply(`<b>❌ Revert Failed</b>\n\n<code>${escapeHtml(msg)}</code>`, { parse_mode: "HTML" });
+    }
+    return;
+  }
+
+  // ── OpenClaw pipeline approval ──────────────────────────────────
   if (data.startsWith("approve:") || data.startsWith("reject:")) {
     const parts = data.split(":");
     const action = parts[0]!;

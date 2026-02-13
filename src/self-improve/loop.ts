@@ -28,6 +28,8 @@ export interface ImprovementResult {
   /** Human-readable summary. */
   summary: string;
   timestamp: string;
+  /** Is this result waiting for push approval? */
+  pendingApproval: boolean;
 }
 
 export interface ImprovementLoopConfig {
@@ -49,12 +51,14 @@ export interface ImprovementLoopConfig {
  *   1. ANALYZE — Read portfolio, find weak scorecard dimensions
  *   2. CODE    — Use LLM to generate targeted fixes to weak agents
  *   3. TEST    — Run vitest, ensure nothing breaks
- *   4. PUSH    — If tests pass, branch → commit → push → merge
- *   5. REVERT  — If tests fail, restore original files
+ *   4. PAUSE   — Wait for explicit human approval before pushing
+ *   5. PUSH    — If approved, branch → commit → push → merge
+ *   6. REVERT  — If rejected or tests fail, restore original files
  *
  * Safety guardrails:
  *   - Only modifies files under src/core/agents/
  *   - Always runs tests before pushing
+ *   - **Never pushes without explicit human approval**
  *   - Creates a feature branch (never force-pushes main)
  *   - Keeps backups of original files
  *   - Maximum 2 patches per cycle
@@ -73,6 +77,10 @@ export class ImprovementLoop {
   /** Prevent concurrent runs. */
   private running = false;
 
+  /** State held between analyze+test and push-approval. */
+  private pendingResult: ImprovementResult | null = null;
+  private pendingBackups: Map<string, string> = new Map();
+
   constructor(config: ImprovementLoopConfig) {
     this.analyst = new Analyst(config.memory);
     this.coder = new Coder(config.llm, config.workspaceRoot);
@@ -89,9 +97,15 @@ export class ImprovementLoop {
     return this.running;
   }
 
+  /** Is there a pending result waiting for push approval? */
+  hasPendingApproval(): boolean {
+    return this.pendingResult !== null && this.pendingResult.pendingApproval;
+  }
+
   /**
-   * Execute one self-improvement cycle.
-   * Returns a full result with analysis, patches, test results, and git status.
+   * Execute steps 1-3: Analyze → Code → Test.
+   * If patches pass tests, the result has pendingApproval=true.
+   * Call approvePush() or rejectPush() to finalize.
    */
   async runCycle(): Promise<ImprovementResult> {
     if (this.running) {
@@ -99,15 +113,18 @@ export class ImprovementLoop {
     }
 
     this.running = true;
+    this.pendingResult = null;
+    this.pendingBackups.clear();
     logger.info("═══ Self-Improvement Cycle Started ═══");
 
     try {
       // ── Step 1: ANALYZE ─────────────────────────────────────
-      logger.info("Step 1/4: Analyzing portfolio...");
+      logger.info("Step 1/3: Analyzing portfolio...");
       const analysis = await this.analyst.analyze(this.minRuns);
 
       if (analysis.weaknesses.length === 0) {
         logger.info("No weaknesses found — all scores are healthy!");
+        this.running = false;
         return this.result(
           true,
           `All dimensions are healthy (avg ${analysis.averageTotalScore}/25 across ${analysis.totalRuns} runs). No improvements needed.`,
@@ -121,10 +138,11 @@ export class ImprovementLoop {
       );
 
       // ── Step 2: CODE ────────────────────────────────────────
-      logger.info("Step 2/4: Generating code patches...");
+      logger.info("Step 2/3: Generating code patches...");
       const patches = await this.coder.generatePatches(analysis.weaknesses, this.maxPatches);
 
       if (patches.length === 0) {
+        this.running = false;
         return this.result(
           false,
           `Found ${analysis.weaknesses.length} weakness(es) but could not generate valid patches.`,
@@ -141,7 +159,7 @@ export class ImprovementLoop {
       }
 
       // ── Step 3: TEST ────────────────────────────────────────
-      logger.info("Step 3/4: Running tests...");
+      logger.info("Step 3/3: Running tests...");
       const validation = this.validator.run();
 
       if (!validation.passed) {
@@ -152,6 +170,7 @@ export class ImprovementLoop {
           logger.info({ file: filePath }, "Reverted");
         }
 
+        this.running = false;
         return this.result(
           false,
           `Generated ${patches.length} patch(es) but tests failed (${validation.failedTests} failures). All changes reverted.`,
@@ -161,38 +180,80 @@ export class ImprovementLoop {
 
       logger.info({ total: validation.totalTests }, "All tests passed!");
 
-      // ── Step 4: PUSH ────────────────────────────────────────
-      let git: GitResult | null = null;
-
-      if (this.enableGitPush) {
-        logger.info("Step 4/4: Pushing to GitHub...");
-        const dimensions = patches.map((p) => p.targetDimension);
-        const commitMessage =
-          `refactor(self-improve): improve ${dimensions.join(", ")} scores\n\n` +
-          patches.map((p) => `- ${p.explanation}`).join("\n") +
-          `\n\n${validation.totalTests} tests passing`;
-
-        git = this.autoGit.fullWorkflow(dimensions, commitMessage);
-
-        if (!git.success) {
-          return this.result(
-            false,
-            `Patches applied and tests pass, but git push failed: ${git.error}`,
-            { analysis, patches, validation, git },
-          );
-        }
-      } else {
-        logger.info("Step 4/4: Git push disabled (dry-run mode)");
+      // ── PAUSE — Wait for approval ──────────────────────────
+      if (!this.enableGitPush) {
+        logger.info("Git push disabled (dry-run mode). Cycle complete.");
+        this.running = false;
+        return this.result(
+          true,
+          `Dry-run complete: ${patches.length} patch(es), ${validation.totalTests} tests passing. Git push disabled.`,
+          { analysis, patches, validation },
+        );
       }
 
-      // ── SUCCESS ─────────────────────────────────────────────
+      // Store pending state for approval
+      const pendingResult: ImprovementResult = {
+        success: false, // not yet — needs approval
+        analysis,
+        patches,
+        validation,
+        git: null,
+        summary: `✅ ${patches.length} patch(es) applied, ${validation.totalTests} tests passing.\n⏳ Awaiting your approval to push to GitHub.`,
+        timestamp: new Date().toISOString(),
+        pendingApproval: true,
+      };
+
+      this.pendingResult = pendingResult;
+      this.pendingBackups = backups;
+      // Note: running stays true until approval/rejection clears it
+      logger.info("Patches applied & tests pass — awaiting push approval");
+
+      return pendingResult;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error({ error: msg }, "Self-improvement cycle failed");
+      this.running = false;
+      return this.result(false, `Cycle failed: ${msg}`);
+    }
+  }
+
+  /**
+   * Approve the pending push — commits and pushes to GitHub.
+   * Only works if there is a pendingApproval result.
+   */
+  async approvePush(): Promise<ImprovementResult> {
+    if (!this.pendingResult || !this.pendingResult.pendingApproval) {
+      return this.result(false, "No pending improvements to push.");
+    }
+
+    const { analysis, patches, validation } = this.pendingResult;
+
+    try {
+      logger.info("Push approved — committing and pushing to GitHub...");
+
+      const dimensions = patches.map((p) => p.targetDimension);
+      const commitMessage =
+        `refactor(self-improve): improve ${dimensions.join(", ")} scores\n\n` +
+        patches.map((p) => `- ${p.explanation}`).join("\n") +
+        `\n\n${validation!.totalTests} tests passing`;
+
+      const git = this.autoGit.fullWorkflow(dimensions, commitMessage);
+
+      if (!git.success) {
+        return this.result(
+          false,
+          `Patches applied and tests pass, but git push failed: ${git.error}`,
+          { analysis, patches, validation, git },
+        );
+      }
+
       const dims = patches.map((p) => p.targetDimension).join(", ");
       const summary =
         `✅ Self-improvement cycle complete!\n` +
         `  Improved: ${dims}\n` +
         `  Patches: ${patches.length}\n` +
-        `  Tests: ${validation.totalTests} passing\n` +
-        (git ? `  Commit: ${git.commitHash}\n  Branch: ${git.branch}` : `  Mode: dry-run`);
+        `  Tests: ${validation!.totalTests} passing\n` +
+        `  Commit: ${git.commitHash}\n  Branch: ${git.branch}`;
 
       logger.info(summary);
 
@@ -204,15 +265,46 @@ export class ImprovementLoop {
         git,
         summary,
         timestamp: new Date().toISOString(),
+        pendingApproval: false,
       };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      logger.error({ error: msg }, "Self-improvement cycle failed");
-      return this.result(false, `Cycle failed: ${msg}`);
+      logger.error({ error: msg }, "Push failed after approval");
+      return this.result(false, `Push failed: ${msg}`, { analysis, patches, validation });
     } finally {
-      this.running = false;
-      logger.info("═══ Self-Improvement Cycle Ended ═══");
+      this.clearPending();
     }
+  }
+
+  /**
+   * Reject the pending push — reverts all patched files.
+   */
+  async rejectPush(): Promise<ImprovementResult> {
+    if (!this.pendingResult || !this.pendingResult.pendingApproval) {
+      return this.result(false, "No pending improvements to reject.");
+    }
+
+    const { analysis, patches, validation } = this.pendingResult;
+
+    logger.warn("Push rejected — reverting all patches");
+    for (const [filePath, original] of this.pendingBackups) {
+      await fs.writeFile(filePath, original, "utf-8");
+      logger.info({ file: filePath }, "Reverted");
+    }
+
+    const summary = `🚫 Push rejected. ${patches.length} patch(es) reverted.`;
+    logger.info(summary);
+    this.clearPending();
+
+    return this.result(false, summary, { analysis, patches, validation });
+  }
+
+  /** Clear pending state and unlock. */
+  private clearPending(): void {
+    this.pendingResult = null;
+    this.pendingBackups.clear();
+    this.running = false;
+    logger.info("═══ Self-Improvement Cycle Ended ═══");
   }
 
   /** Helper to build a result object. */
@@ -236,6 +328,7 @@ export class ImprovementLoop {
       git: extras?.git ?? null,
       summary,
       timestamp: new Date().toISOString(),
+      pendingApproval: false,
     };
   }
 }
