@@ -96,6 +96,34 @@ function scoreBar(score: number, max: number): string {
 }
 
 /**
+ * Turn an ImplementorAction object into a short, human-readable line.
+ * e.g. "📄 Create src/login.ts" or "▶️ Run npm install"
+ */
+function formatAction(action: Record<string, unknown>): string {
+  const type = action["type"] as string | undefined;
+  const rawPath = (action["path"] as string) ?? "";
+  // Show just the filename (or last 2 segments) to keep it short
+  const shortPath = rawPath.split("/").slice(-2).join("/");
+
+  switch (type) {
+    case "createFile":
+      return `📄 Create <code>${escapeHtml(shortPath)}</code>`;
+    case "editFile":
+      return `✏️ Edit <code>${escapeHtml(shortPath)}</code>`;
+    case "readFile":
+      return `👁 Read <code>${escapeHtml(shortPath)}</code>`;
+    case "runCommand":
+      return `▶️ Run <code>${escapeHtml((action["command"] as string) ?? "command")}</code>`;
+    default: {
+      // Fallback: try description/action fields, then a compact summary
+      const desc = (action["description"] ?? action["action"]) as string | undefined;
+      if (desc) return escapeHtml(desc);
+      return escapeHtml(`${type ?? "action"}: ${shortPath || "unknown"}`);
+    }
+  }
+}
+
+/**
  * Format a pipeline result into a beautiful, human-readable Telegram HTML message.
  */
 function formatResult(artifact: Record<string, unknown>): string {
@@ -153,12 +181,10 @@ function formatResult(artifact: Record<string, unknown>): string {
     const actions = (impl["actions"] as unknown[]) ?? [];
     if (actions.length > 0) {
       lines.push(`<b>⚙️ Actions</b>  (${actions.length} performed)`);
-      for (const action of actions.slice(0, 5)) {
-        const a = action as Record<string, string>;
-        const desc = a["description"] ?? a["action"] ?? JSON.stringify(a);
-        lines.push(`  • ${escapeHtml(desc)}`);
+      for (const action of actions.slice(0, 6)) {
+        lines.push(`  ${formatAction(action as Record<string, unknown>)}`);
       }
-      if (actions.length > 5) lines.push(`  <i>… and ${actions.length - 5} more</i>`);
+      if (actions.length > 6) lines.push(`  <i>… and ${actions.length - 6} more</i>`);
       lines.push("");
     }
   }
@@ -223,12 +249,10 @@ function formatOpenClawResult(result: import("../integrations/openclaw/openclaw.
   const actions = data["actions"] as unknown[] | undefined;
   if (actions && actions.length > 0) {
     lines.push(`<b>⚙️ Actions</b>  (${actions.length})`);
-    for (const action of actions.slice(0, 5)) {
-      const a = action as Record<string, string>;
-      const desc = a["description"] ?? a["action"] ?? JSON.stringify(a);
-      lines.push(`  • ${escapeHtml(desc)}`);
+    for (const action of actions.slice(0, 6)) {
+      lines.push(`  ${formatAction(action as Record<string, unknown>)}`);
     }
-    if (actions.length > 5) lines.push(`  <i>… and ${actions.length - 5} more</i>`);
+    if (actions.length > 6) lines.push(`  <i>… and ${actions.length - 6} more</i>`);
     lines.push("");
   }
 
@@ -511,4 +535,4 @@ main().catch((err) => {
   process.exit(1);
 });
 
-export { bot, orchestrator, adapter, formatResult, formatOpenClawResult, splitMessage, escapeHtml, scoreBar };
+export { bot, orchestrator, adapter, formatResult, formatOpenClawResult, splitMessage, escapeHtml, scoreBar, formatAction };

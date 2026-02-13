@@ -21,6 +21,28 @@ function scoreBarFn(score: number, max: number): string {
   return "█".repeat(filled) + "░".repeat(empty) + ` ${score}/${max}`;
 }
 
+function formatActionFn(action: Record<string, unknown>): string {
+  const type = action["type"] as string | undefined;
+  const rawPath = (action["path"] as string) ?? "";
+  const shortPath = rawPath.split("/").slice(-2).join("/");
+
+  switch (type) {
+    case "createFile":
+      return `📄 Create <code>${escapeHtmlFn(shortPath)}</code>`;
+    case "editFile":
+      return `✏️ Edit <code>${escapeHtmlFn(shortPath)}</code>`;
+    case "readFile":
+      return `👁 Read <code>${escapeHtmlFn(shortPath)}</code>`;
+    case "runCommand":
+      return `▶️ Run <code>${escapeHtmlFn((action["command"] as string) ?? "command")}</code>`;
+    default: {
+      const desc = (action["description"] ?? action["action"]) as string | undefined;
+      if (desc) return escapeHtmlFn(desc);
+      return escapeHtmlFn(`${type ?? "action"}: ${shortPath || "unknown"}`);
+    }
+  }
+}
+
 function splitMessageFn(text: string): string[] {
   const MAX = 4096;
   if (text.length <= MAX) return [text];
@@ -141,12 +163,10 @@ function formatOpenClawResultFn(result: OpenClawOutbound): string {
   const actions = data["actions"] as unknown[] | undefined;
   if (actions && actions.length > 0) {
     lines.push(`<b>⚙️ Actions</b>  (${actions.length})`);
-    for (const action of actions.slice(0, 5)) {
-      const a = action as Record<string, string>;
-      const desc = a["description"] ?? a["action"] ?? JSON.stringify(a);
-      lines.push(`  • ${escapeHtmlFn(desc)}`);
+    for (const action of actions.slice(0, 6)) {
+      lines.push(`  ${formatActionFn(action as Record<string, unknown>)}`);
     }
-    if (actions.length > 5) lines.push(`  <i>… and ${actions.length - 5} more</i>`);
+    if (actions.length > 6) lines.push(`  <i>… and ${actions.length - 6} more</i>`);
     lines.push("");
   }
 
@@ -228,6 +248,37 @@ describe("Telegram Bot Utilities", () => {
     });
   });
 
+  describe("formatAction", () => {
+    it("should format createFile actions with short path", () => {
+      const result = formatActionFn({ type: "createFile", path: "/Users/dj/project/src/login.ts" });
+      expect(result).toContain("📄 Create");
+      expect(result).toContain("src/login.ts");
+      expect(result).not.toContain("/Users/dj");
+    });
+
+    it("should format editFile actions", () => {
+      const result = formatActionFn({ type: "editFile", path: "/app/src/index.ts" });
+      expect(result).toContain("✏️ Edit");
+      expect(result).toContain("src/index.ts");
+    });
+
+    it("should format runCommand actions", () => {
+      const result = formatActionFn({ type: "runCommand", command: "npm install express" });
+      expect(result).toContain("▶️ Run");
+      expect(result).toContain("npm install express");
+    });
+
+    it("should fall back to description for unknown types", () => {
+      const result = formatActionFn({ description: "Custom step" });
+      expect(result).toBe("Custom step");
+    });
+
+    it("should escape HTML in paths", () => {
+      const result = formatActionFn({ type: "createFile", path: "/app/<script>.ts" });
+      expect(result).toContain("&lt;script&gt;");
+    });
+  });
+
   describe("formatResult", () => {
     it("should format a complete artifact with HTML", () => {
       const artifact = {
@@ -282,9 +333,12 @@ describe("Telegram Bot Utilities", () => {
           data: {
             totalScore: 22,
             scorecard: { correctness: 5, verification: 4, safety: 5, clarity: 4, autonomy: 4 },
-            actions: [{ description: "Created user model" }],
+            actions: [
+              { type: "createFile", path: "/app/src/user.ts", requiresApproval: false, isDestructive: false },
+              { type: "editFile", path: "/app/src/index.ts", requiresApproval: false, isDestructive: false },
+            ],
             filesCreated: ["src/user.ts"],
-            filesModified: [],
+            filesModified: ["src/index.ts"],
             commandsRun: [],
           },
           summary: "Successfully built user management system",
@@ -301,9 +355,12 @@ describe("Telegram Bot Utilities", () => {
       expect(formatted).toContain("█"); // score bars
       expect(formatted).toContain("Correctness");
       expect(formatted).toContain("5/5");
-      expect(formatted).toContain("Created user model");
-      expect(formatted).toContain("<b>📁 Files</b>");
+      // Actions should show human-readable format, not JSON
+      expect(formatted).toContain("📄 Create");
       expect(formatted).toContain("src/user.ts");
+      expect(formatted).toContain("✏️ Edit");
+      expect(formatted).not.toContain("requiresApproval"); // no raw JSON keys
+      expect(formatted).toContain("<b>📁 Files</b>");
       // Short run ID (first segment before dash)
       expect(formatted).toContain("abc");
       expect(formatted).toContain("AgencyCore → telegram-user-42");
@@ -362,7 +419,7 @@ describe("Telegram Bot Utilities", () => {
         payload: {
           success: true,
           data: {
-            actions: [{ description: "Handle <div> & <span> tags" }],
+            actions: [{ type: "createFile", path: "/app/<div>.ts" }],
           },
           summary: "Processed a & b < c > d",
         },
@@ -371,7 +428,7 @@ describe("Telegram Bot Utilities", () => {
 
       const formatted = formatOpenClawResultFn(result);
       expect(formatted).toContain("a &amp; b &lt; c &gt; d");
-      expect(formatted).toContain("&lt;div&gt; &amp; &lt;span&gt;");
+      expect(formatted).toContain("&lt;div&gt;");
       expect(formatted).toContain("user&lt;script&gt;");
     });
   });
