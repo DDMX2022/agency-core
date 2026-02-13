@@ -37,21 +37,77 @@ function formatResultFn(artifact: Record<string, unknown>): string {
   const obs = artifact["observer"] as Record<string, unknown> | undefined;
 
   const lines: string[] = [];
-  lines.push("✅ *Pipeline Complete*\n");
+  lines.push("✅ Pipeline Complete\n");
 
   if (gk) {
-    lines.push(`📊 *Score:* ${gk["totalScore"] ?? "?"}/25`);
-    lines.push(`💬 *Feedback:* ${gk["feedback"] ?? ""}\n`);
+    lines.push(`📊 Score: ${gk["totalScore"] ?? "?"}/25`);
+    lines.push(`💬 Feedback: ${gk["feedback"] ?? ""}\n`);
   }
 
   if (obs) {
     const summary = (obs["summary"] as string) ?? "";
     if (summary) {
-      lines.push(`🔍 *Analysis:*\n${summary}\n`);
+      lines.push(`🔍 Analysis:\n${summary}\n`);
     }
   }
 
-  lines.push(`🆔 \`${artifact["runId"]}\``);
+  lines.push(`🆔 ${artifact["runId"]}`);
+  return lines.join("\n");
+}
+
+interface OpenClawOutbound {
+  type: string;
+  runId: string;
+  from: string;
+  to: string;
+  topic: string;
+  payload: {
+    success: boolean;
+    data: unknown;
+    summary: string;
+    artifactId?: string;
+  };
+  timestamp: string;
+}
+
+function formatOpenClawResultFn(result: OpenClawOutbound): string {
+  const lines: string[] = [];
+  const payload = result.payload;
+  const data = (payload.data ?? {}) as Record<string, unknown>;
+
+  if (payload.success) {
+    lines.push("✅ OpenClaw Pipeline Complete\n");
+  } else {
+    lines.push("⚠️ OpenClaw Pipeline Finished (with issues)\n");
+  }
+
+  const summary = payload.summary;
+  if (summary) {
+    lines.push(`💬 Summary: ${summary}\n`);
+  }
+
+  const totalScore = data["totalScore"] as number | undefined;
+  if (totalScore !== undefined) {
+    lines.push(`📊 Score: ${totalScore}/25`);
+  }
+
+  const scorecard = data["scorecard"] as Record<string, number> | undefined;
+  if (scorecard) {
+    lines.push(`  Correctness:  ${scorecard["correctness"] ?? "?"}/5`);
+    lines.push(`  Verification: ${scorecard["verification"] ?? "?"}/5`);
+    lines.push(`  Safety:       ${scorecard["safety"] ?? "?"}/5`);
+    lines.push(`  Clarity:      ${scorecard["clarity"] ?? "?"}/5`);
+    lines.push(`  Autonomy:     ${scorecard["autonomy"] ?? "?"}/5`);
+    lines.push("");
+  }
+
+  lines.push("");
+  lines.push(`📨 Envelope: ${result.from} → ${result.to}`);
+  lines.push(`🆔 Run: ${result.runId}`);
+  if (payload.artifactId) {
+    lines.push(`📦 Artifact: ${payload.artifactId}`);
+  }
+
   return lines.join("\n");
 }
 
@@ -78,7 +134,6 @@ describe("Telegram Bot Utilities", () => {
       const longText = Array.from({ length: 100 }, (_, i) => `Line ${i}`).join("\n");
       const chunks = splitMessageFn(longText);
       const rejoined = chunks.join("\n");
-      // Allow for trimming differences
       expect(rejoined.replace(/\s+/g, " ")).toBe(longText.replace(/\s+/g, " "));
     });
   });
@@ -119,6 +174,82 @@ describe("Telegram Bot Utilities", () => {
       const result = formatResultFn(artifact);
       expect(result).toContain("20/25");
       expect(result).not.toContain("Analysis");
+    });
+  });
+
+  describe("formatOpenClawResult", () => {
+    it("should format a successful OpenClaw result", () => {
+      const result: OpenClawOutbound = {
+        type: "RESULT",
+        runId: "abc-123",
+        from: "AgencyCore",
+        to: "telegram-user-42",
+        topic: "telegram-request",
+        payload: {
+          success: true,
+          data: {
+            totalScore: 22,
+            scorecard: { correctness: 5, verification: 4, safety: 5, clarity: 4, autonomy: 4 },
+            actions: [{ description: "Created user model" }],
+            filesCreated: ["src/user.ts"],
+            filesModified: [],
+            commandsRun: [],
+          },
+          summary: "Successfully built user management system",
+          artifactId: "art-456",
+        },
+        timestamp: new Date().toISOString(),
+      };
+
+      const formatted = formatOpenClawResultFn(result);
+      expect(formatted).toContain("OpenClaw Pipeline Complete");
+      expect(formatted).toContain("22/25");
+      expect(formatted).toContain("Successfully built");
+      expect(formatted).toContain("AgencyCore → telegram-user-42");
+      expect(formatted).toContain("abc-123");
+      expect(formatted).toContain("art-456");
+      expect(formatted).toContain("Correctness:  5/5");
+    });
+
+    it("should format a failed OpenClaw result", () => {
+      const result: OpenClawOutbound = {
+        type: "RESULT",
+        runId: "fail-123",
+        from: "AgencyCore",
+        to: "telegram-user-42",
+        topic: "telegram-request",
+        payload: {
+          success: false,
+          data: { error: "Something went wrong" },
+          summary: "Pipeline failed: timeout",
+        },
+        timestamp: new Date().toISOString(),
+      };
+
+      const formatted = formatOpenClawResultFn(result);
+      expect(formatted).toContain("with issues");
+      expect(formatted).toContain("Pipeline failed: timeout");
+      expect(formatted).toContain("fail-123");
+    });
+
+    it("should include envelope routing info", () => {
+      const result: OpenClawOutbound = {
+        type: "RESULT",
+        runId: "route-test",
+        from: "AgencyCore",
+        to: "telegram-user-99",
+        topic: "telegram-request",
+        payload: {
+          success: true,
+          data: {},
+          summary: "Done",
+        },
+        timestamp: new Date().toISOString(),
+      };
+
+      const formatted = formatOpenClawResultFn(result);
+      expect(formatted).toContain("Envelope: AgencyCore → telegram-user-99");
+      expect(formatted).toContain("Run: route-test");
     });
   });
 });
