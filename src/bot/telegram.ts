@@ -7,6 +7,7 @@ import { Orchestrator } from "../core/pipeline/orchestrator.js";
 import { OpenClawAdapter } from "../integrations/openclaw/openclawAdapter.js";
 import type { OpenClawInbound } from "../integrations/openclaw/openclaw.schema.js";
 import { createLLMProvider } from "../providers/index.js";
+import { ImprovementLoop } from "../self-improve/loop.js";
 
 const logger = pino({ name: "telegram-bot" });
 
@@ -36,6 +37,15 @@ const orchestrator = new Orchestrator({
 
 const openclawSecret = process.env["OPENCLAW_SHARED_SECRET"];
 const adapter = new OpenClawAdapter(orchestrator, openclawSecret);
+
+const improvementLoop = new ImprovementLoop({
+  llm,
+  memory: orchestrator.getMemory(),
+  workspaceRoot: WORKSPACE_ROOT,
+  maxPatches: 2,
+  minRuns: 1,
+  enableGitPush: true,
+});
 
 // ── Bot Setup ──────────────────────────────────────────────────────
 const bot = new Bot(TOKEN);
@@ -311,6 +321,7 @@ bot.command("start", async (ctx) => {
       `<b>Commands</b>\n` +
       `/start  — This message\n` +
       `/health — System status\n` +
+      `/improve — Self-improvement cycle\n` +
       `/approvals — Pending actions\n` +
       `/id — Your Telegram ID\n\n` +
       `<i>Just type your request to get started! 🚀</i>`,
@@ -367,6 +378,104 @@ bot.command("approvals", async (ctx) => {
         `${escapeHtml(approval.description)}\n\n` +
         `<i>From: ${escapeHtml(approval.from)}  ·  🆔 ${shortId}</i>`,
       { reply_markup: keyboard, parse_mode: "HTML" }
+    );
+  }
+});
+
+// ── /improve command (Self-Improvement) ────────────────────────────
+bot.command("improve", async (ctx) => {
+  if (improvementLoop.isRunning()) {
+    await ctx.reply("<i>⏳ A self-improvement cycle is already running…</i>", { parse_mode: "HTML" });
+    return;
+  }
+
+  await ctx.reply(
+    "🧬 <b>Starting Self-Improvement Cycle</b>\n\n" +
+      "<code>1. Analyze portfolio → find weak scores\n" +
+      "2. Generate code patches via LLM\n" +
+      "3. Run tests → validate changes\n" +
+      "4. Push to GitHub if tests pass</code>\n\n" +
+      "<i>This may take a minute…</i>",
+    { parse_mode: "HTML" },
+  );
+  await ctx.replyWithChatAction("typing");
+
+  try {
+    const result = await improvementLoop.runCycle();
+
+    const lines: string[] = [];
+
+    if (result.success) {
+      lines.push("<b>✅ Self-Improvement Complete</b>");
+    } else {
+      lines.push("<b>⚠️ Self-Improvement Cycle Finished</b>");
+    }
+    lines.push("━━━━━━━━━━━━━━━━━━━━━━");
+    lines.push("");
+
+    // Analysis summary
+    lines.push(`<b>📊 Portfolio</b>  ${result.analysis.totalRuns} runs analyzed`);
+    if (result.analysis.totalRuns > 0) {
+      lines.push(`  Avg Score: ${result.analysis.averageTotalScore}/25`);
+      lines.push(`  Best: ${result.analysis.bestScore}/25  ·  Worst: ${result.analysis.worstScore}/25`);
+    }
+    lines.push("");
+
+    // Weaknesses
+    if (result.analysis.weaknesses.length > 0) {
+      lines.push(`<b>🔍 Weaknesses Found</b>  (${result.analysis.weaknesses.length})`);
+      for (const w of result.analysis.weaknesses) {
+        lines.push(`  <code>${w.dimension.padEnd(14)} ${scoreBar(w.averageScore, 5)}</code>`);
+      }
+      lines.push("");
+    }
+
+    // Patches
+    if (result.patches.length > 0) {
+      lines.push(`<b>🔧 Patches</b>  (${result.patches.length})`);
+      for (const p of result.patches) {
+        const shortFile = p.filePath.split("/").slice(-2).join("/");
+        lines.push(`  ✏️ <code>${escapeHtml(shortFile)}</code> → ${escapeHtml(p.targetDimension)}`);
+      }
+      lines.push("");
+    }
+
+    // Tests
+    if (result.validation) {
+      const v = result.validation;
+      if (v.passed) {
+        lines.push(`<b>✅ Tests</b>  ${v.totalTests} passed in ${v.duration}`);
+      } else {
+        lines.push(`<b>❌ Tests</b>  ${v.failedTests} failed / ${v.totalTests} total`);
+      }
+      lines.push("");
+    }
+
+    // Git
+    if (result.git) {
+      if (result.git.success) {
+        lines.push(`<b>🚀 Pushed</b>  <code>${result.git.commitHash}</code>`);
+        lines.push(`  Branch: <code>${escapeHtml(result.git.branch)}</code>`);
+      } else {
+        lines.push(`<b>❌ Git</b>  ${escapeHtml(result.git.error ?? "push failed")}`);
+      }
+      lines.push("");
+    }
+
+    // Summary
+    lines.push("<code>━━━━━━━━━━━━━━━━━━━━━━</code>");
+    lines.push(`<i>${escapeHtml(result.summary.split("\n")[0] ?? "Done")}</i>`);
+
+    const responseText = lines.join("\n");
+    const chunks = splitMessage(responseText);
+    for (const chunk of chunks) {
+      await ctx.reply(chunk, { parse_mode: "HTML" });
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    await ctx.reply(
+      `<b>❌ Self-Improvement Failed</b>\n\n<code>${escapeHtml(msg)}</code>`,
+      { parse_mode: "HTML" },
     );
   }
 });
