@@ -38,14 +38,14 @@ export class Implementor {
       if (step.action === "Verify all sub-problems are resolved") continue;
 
       const filename = toFilename(step.action);
-      const filePath = `${root}/${filename}`;
+      const filePath = path.join(root, filename);
       const content = await this.generateContent(step.action, obs.summary);
 
       proposedActions.push({
         type: "createFile" as const,
         path: filePath,
         content,
-        requiresApproval: false, // No approval needed for createFile actions
+        requiresApproval: false,
         isDestructive: false,
       });
     }
@@ -90,7 +90,6 @@ export class Implementor {
       const user = `Task: ${action}\nProject context: ${projectSummary}`;
 
       const code = await this.llm.generate(system, user);
-      // Basic sanity: if LLM returned something non-empty, use it
       if (code && code.trim().length > 10) {
         return code.trim();
       }

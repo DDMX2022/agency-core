@@ -1,0 +1,15 @@
+{
+  "currentLevel": 1,
+  "totalRuns": 1,
+  "totalScore": 19,
+  "scores": [
+    19
+  ],
+  "testsPassed": 0,
+  "testsFailed": 0,
+  "deployCount": 0,
+  "selfImproveCount": 0,
+  "promotionHistory": [],
+  "createdAt": "2026-02-14T14:48:57.673Z",
+  "updatedAt": "2026-02-14T14:52:00.567Z"
+}
