@@ -32,7 +32,7 @@ const DEFAULT_BLOCKED_COMMANDS = [
 
 export function createDefaultPolicy(workspaceRoot: string): PermissionPolicy {
   return {
-    currentLevel: 0,
+    currentLevel: 1,
     allowedWorkspacePaths: [workspaceRoot],
     blockedCommands: [...DEFAULT_BLOCKED_COMMANDS],
   };

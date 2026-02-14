@@ -34,6 +34,7 @@ import {
   createDefaultPolicy,
   type PermissionPolicy,
 } from "../permissions/index.js";
+import { PromotionEngine, type PromotionEvent } from "../promotion/index.js";
 
 const logger = pino({ name: "orchestrator" });
 
@@ -44,6 +45,8 @@ export interface OrchestratorConfig {
   permissionPolicy?: PermissionPolicy;
   /** Enable mock-mode ToolRunner (default: true). */
   toolRunnerMockMode?: boolean;
+  /** Enable promotion engine (default: true). */
+  enablePromotion?: boolean;
 }
 
 /**
@@ -67,6 +70,7 @@ export class Orchestrator {
   private readonly learner: Learner;
   private readonly workspaceRoot: string;
   private readonly toolRunnerMockMode: boolean;
+  private readonly promotion: PromotionEngine | null;
 
   /** Improvements from the last Gatekeeper run – fed back to Guide. */
   private previousImprovements: string[] = [];
@@ -78,14 +82,26 @@ export class Orchestrator {
     this.learner = new Learner(this.llm);
     this.workspaceRoot = config.workspaceRoot;
     this.toolRunnerMockMode = config.toolRunnerMockMode ?? true;
+    this.promotion = (config.enablePromotion ?? true)
+      ? new PromotionEngine(config.memoryDir, this.policy.currentLevel)
+      : null;
   }
 
   async initialize(): Promise<void> {
     await this.memory.initialize();
+    if (this.promotion) {
+      await this.promotion.initialize();
+      // Sync policy level from persisted career stats
+      this.policy.currentLevel = this.promotion.getLevel();
+    }
   }
 
   getMemory(): MemoryManager {
     return this.memory;
+  }
+
+  getPromotion(): PromotionEngine | null {
+    return this.promotion;
   }
 
   async run(request: string): Promise<RunArtifact> {
@@ -237,6 +253,18 @@ export class Orchestrator {
         totalScore: gatekeeperOut.totalScore,
         artifactPath,
       });
+
+      // Track run in promotion engine & auto-promote if thresholds met
+      if (this.promotion) {
+        const promotionEvent = await this.promotion.recordRun(gatekeeperOut.totalScore);
+        if (promotionEvent) {
+          this.policy.currentLevel = promotionEvent.toLevel;
+          logger.info(
+            { runId, from: promotionEvent.fromLevel, to: promotionEvent.toLevel },
+            "🎉 Agent promoted!",
+          );
+        }
+      }
 
       logger.info({ runId, totalScore: gatekeeperOut.totalScore }, "Pipeline completed");
       return artifact;

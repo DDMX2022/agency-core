@@ -8,6 +8,10 @@ import { OpenClawAdapter } from "../integrations/openclaw/openclawAdapter.js";
 import type { OpenClawInbound } from "../integrations/openclaw/openclaw.schema.js";
 import { createLLMProvider } from "../providers/index.js";
 import { ImprovementLoop } from "../self-improve/loop.js";
+import { DevLoop } from "../self-improve/devLoop.js";
+import { ProjectDeployer } from "../core/deployer/index.js";
+import { LEVEL_TITLES } from "../core/promotion/index.js";
+import type { PermissionLevel } from "../core/permissions/index.js";
 
 const logger = pino({ name: "telegram-bot" });
 
@@ -46,6 +50,22 @@ const improvementLoop = new ImprovementLoop({
   minRuns: 1,
   enableGitPush: true,
 });
+
+const deployer = new ProjectDeployer(process.env["GITHUB_OWNER"]);
+
+const devLoop = new DevLoop({
+  orchestrator,
+  llm,
+  workspaceRoot: WORKSPACE_ROOT,
+  maxIterations: 10,
+  targetLevel: 3,
+  autoDeploy: true,
+  autoImprove: true,
+  githubOwner: process.env["GITHUB_OWNER"],
+});
+
+// Track chat IDs for promotion notifications
+const notifyChats = new Set<number>();
 
 // ── Bot Setup ──────────────────────────────────────────────────────
 const bot = new Bot(TOKEN);
@@ -285,7 +305,7 @@ function formatOpenClawResult(result: import("../integrations/openclaw/openclaw.
   const filesModified = data["filesModified"] as string[] | undefined;
   const hasFiles = (filesCreated && filesCreated.length > 0) || (filesModified && filesModified.length > 0);
   if (hasFiles) {
-    lines.push("<b>� Files</b>");
+    lines.push("<b>📂 Files</b>");
     if (filesCreated && filesCreated.length > 0) {
       for (const f of filesCreated.slice(0, 5)) {
         lines.push(`  ＋ <code>${escapeHtml(f)}</code>`);
@@ -335,7 +355,10 @@ bot.command("start", async (ctx) => {
       `<b>Commands</b>\n` +
       `/start  — This message\n` +
       `/health — System status\n` +
-      `/improve — Self-improvement cycle\n` +
+      `/status — Level &amp; promotion progress\n` +
+      `/devloop — Start continuous dev loop\n` +
+      `/improve — Single self-improvement cycle\n` +
+      `/deploy — Deploy project to GitHub\n` +
       `/approvals — Pending actions\n` +
       `/id — Your Telegram ID\n\n` +
       `<i>Just type your request to get started! 🚀</i>`,
@@ -368,6 +391,187 @@ bot.command("health", async (ctx) => {
 // ── /id command ────────────────────────────────────────────────────
 bot.command("id", async (ctx) => {
   await ctx.reply(`Your Telegram user ID: ${ctx.from?.id}`);
+});
+
+// ── /status command — Level & promotion progress ───────────────────
+bot.command("status", async (ctx) => {
+  const promotion = orchestrator.getPromotion();
+  if (!promotion) {
+    await ctx.reply("<i>Promotion engine not enabled.</i>", { parse_mode: "HTML" });
+    return;
+  }
+
+  // Register chat for promotion notifications
+  if (ctx.chat) notifyChats.add(ctx.chat.id);
+
+  const stats = promotion.getStats();
+  const check = promotion.checkPromotion();
+  const level = stats.currentLevel as PermissionLevel;
+  const title = LEVEL_TITLES[level];
+  const avgScore = stats.totalRuns > 0 ? Math.round((stats.totalScore / stats.totalRuns) * 10) / 10 : 0;
+
+  const lines: string[] = [];
+  lines.push(`<b>🏆 Agent Status</b>`);
+  lines.push("━━━━━━━━━━━━━━━━━━━━━━");
+  lines.push("");
+  lines.push(`<b>Level:</b>  L${level} — ${escapeHtml(title)}`);
+  lines.push(`<b>Runs:</b>   ${stats.totalRuns}`);
+  lines.push(`<b>Avg Score:</b> ${avgScore}/25`);
+  lines.push(`<b>Deploys:</b> ${stats.deployCount}`);
+  lines.push(`<b>Self-Improves:</b> ${stats.selfImproveCount}`);
+  lines.push("");
+
+  if (check.nextLevel !== null) {
+    lines.push(`<b>Next Level:</b> L${check.nextLevel} — ${escapeHtml(LEVEL_TITLES[check.nextLevel as PermissionLevel])}`);
+    lines.push("");
+    for (const [key, p] of Object.entries(check.progress)) {
+      const icon = p.met ? "✅" : "⬜";
+      const label = key.replace(/([A-Z])/g, " $1").replace(/^./, (s) => s.toUpperCase());
+      lines.push(`${icon} <b>${escapeHtml(label)}:</b> ${p.current}/${p.required}`);
+    }
+  } else {
+    lines.push("<b>🎖 MAX LEVEL REACHED!</b>");
+  }
+
+  lines.push("");
+
+  if (stats.promotionHistory.length > 0) {
+    lines.push("<b>📈 Promotion History</b>");
+    for (const event of stats.promotionHistory) {
+      const date = new Date(event.timestamp).toLocaleDateString();
+      lines.push(`  L${event.fromLevel} → L${event.toLevel} on ${date}`);
+    }
+  }
+
+  lines.push("");
+  lines.push("<code>━━━━━━━━━━━━━━━━━━━━━━</code>");
+
+  const keyboard = new InlineKeyboard()
+    .text("🔄 Start Dev Loop", "start_devloop")
+    .text("🧬 Self-Improve", "trigger_improve");
+
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: keyboard });
+});
+
+// ── /devloop command — Start continuous dev loop ───────────────────
+bot.command("devloop", async (ctx) => {
+  if (devLoop.isRunning()) {
+    await ctx.reply("<b>⏳ DevLoop already running.</b>\nUse /status to check progress.", { parse_mode: "HTML" });
+    return;
+  }
+
+  // Register chat for notifications
+  if (ctx.chat) notifyChats.add(ctx.chat.id);
+  const chatId = ctx.chat.id;
+
+  const promotion = orchestrator.getPromotion();
+  const currentLevel = promotion?.getLevel() ?? 1;
+  const currentTitle = promotion?.getTitle() ?? "Junior Developer";
+
+  await ctx.reply(
+    `<b>🔁 Starting Dev Loop</b>\n\n` +
+      `Current: L${currentLevel} — ${escapeHtml(currentTitle)}\n` +
+      `Target: L3 — Senior Developer\n` +
+      `Max iterations: 10\n\n` +
+      `<i>I'll run pipelines, self-improve, deploy, and earn promotions autonomously.</i>\n` +
+      `<i>Send</i> /stop <i>to abort.</i>`,
+    { parse_mode: "HTML" }
+  );
+
+  // Progress callback — send iteration updates to Telegram
+  devLoop.onProgress = async (iter) => {
+    const lines: string[] = [];
+    lines.push(`<b>🔁 Iteration ${iter.iteration}</b>`);
+    lines.push(`Level: L${iter.level} — ${escapeHtml(iter.levelTitle)}`);
+    if (iter.pipelineScore !== null) lines.push(`Pipeline score: ${iter.pipelineScore}/25`);
+    if (iter.improvement?.success) lines.push("✅ Self-improvement applied");
+    if (iter.deploy?.success) lines.push(`🚀 Deployed: ${escapeHtml(iter.deploy.repoUrl ?? "")}`);
+    if (iter.promotion) {
+      lines.push("");
+      lines.push(`<b>🎉 PROMOTED!</b>`);
+      lines.push(`L${iter.promotion.fromLevel} → L${iter.promotion.toLevel}`);
+      lines.push(`${escapeHtml(LEVEL_TITLES[iter.promotion.toLevel as PermissionLevel])}`);
+    }
+    try {
+      await bot.api.sendMessage(chatId, lines.join("\n"), { parse_mode: "HTML" });
+    } catch (err) {
+      logger.error({ error: err }, "Failed to send progress update");
+    }
+  };
+
+  // Run in background
+  devLoop.run()
+    .then(async (result) => {
+      const lines: string[] = [];
+      lines.push("<b>🏁 Dev Loop Complete!</b>");
+      lines.push("━━━━━━━━━━━━━━━━━━━━━━");
+      lines.push("");
+      lines.push(`<b>Iterations:</b> ${result.iterations.length}`);
+      lines.push(`<b>Final Level:</b> L${result.finalLevel} — ${escapeHtml(result.finalTitle)}`);
+      lines.push(`<b>Promotions:</b> ${result.iterations.filter((i) => i.promotion).length}`);
+      lines.push(`<b>Deploys:</b> ${result.iterations.filter((i) => i.deploy?.success).length}`);
+      lines.push("");
+      lines.push("<code>━━━━━━━━━━━━━━━━━━━━━━</code>");
+
+      const keyboard = new InlineKeyboard()
+        .text("📊 Status", "show_status")
+        .text("🔁 Run Again", "start_devloop");
+
+      try {
+        await bot.api.sendMessage(chatId, lines.join("\n"), { parse_mode: "HTML", reply_markup: keyboard });
+      } catch (err) {
+        logger.error({ error: err }, "Failed to send dev loop result");
+      }
+    })
+    .catch(async (err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      try {
+        await bot.api.sendMessage(chatId, `<b>❌ Dev Loop Failed</b>\n\n<code>${escapeHtml(msg)}</code>`, { parse_mode: "HTML" });
+      } catch { /* ignore */ }
+    });
+});
+
+// ── /stop command — Abort dev loop ────────────────────────────────
+bot.command("stop", async (ctx) => {
+  if (devLoop.isRunning()) {
+    devLoop.abort();
+    await ctx.reply("🛑 <i>Stopping dev loop after current iteration…</i>", { parse_mode: "HTML" });
+  } else {
+    await ctx.reply("<i>Nothing is running.</i>", { parse_mode: "HTML" });
+  }
+});
+
+// ── /deploy command ────────────────────────────────────────────────
+bot.command("deploy", async (ctx) => {
+  const statusMsg = await ctx.reply("🚀 <i>Deploying project to GitHub…</i>", { parse_mode: "HTML" });
+
+  try {
+    const result = await deployer.deployFromWorkspace(WORKSPACE_ROOT);
+
+    try { await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch { /* ignore */ }
+
+    if (result.success) {
+      await ctx.reply(
+        `<b>✅ Deployed to GitHub!</b>\n\n` +
+          `📦 <a href="${escapeHtml(result.repoUrl ?? "")}">${escapeHtml(result.repoUrl ?? "")}</a>\n` +
+          `📄 ${result.filesCount} files\n` +
+          `#️⃣ <code>${escapeHtml(result.commitHash ?? "")}</code>`,
+        { parse_mode: "HTML", link_preview_options: { is_disabled: true } }
+      );
+    } else {
+      await ctx.reply(
+        `<b>❌ Deploy Failed</b>\n\n<code>${escapeHtml(result.error ?? "Unknown error")}</code>`,
+        { parse_mode: "HTML" }
+      );
+    }
+  } catch (error) {
+    try { await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch { /* ignore */ }
+    const msg = error instanceof Error ? error.message : String(error);
+    await ctx.reply(
+      `<b>❌ Deploy Failed</b>\n\n<code>${escapeHtml(msg)}</code>`,
+      { parse_mode: "HTML" }
+    );
+  }
 });
 
 // ── /approvals command ─────────────────────────────────────────────
@@ -643,6 +847,8 @@ bot.on("callback_query:data", async (ctx) => {
             .text("🔄 Run Again", `rerun:${newRerunId}`)
             .text("🧬 Self-Improve", "trigger_improve")
             .row()
+            .text("🚀 Deploy to GitHub", `deploy:${result.runId}`)
+            .row()
             .text("📊 Score Details", `details:${result.runId}`)
             .text("❤️ Helpful", `feedback:good:${result.runId}`)
             .text("👎 Not Helpful", `feedback:bad:${result.runId}`);
@@ -662,6 +868,52 @@ bot.on("callback_query:data", async (ctx) => {
   if (data === "trigger_improve") {
     await ctx.answerCallbackQuery({ text: "🧬 Use /improve to start" });
     await ctx.reply("<i>Send</i> /improve <i>to start a self-improvement cycle.</i>", { parse_mode: "HTML" });
+    return;
+  }
+
+  // ── Start dev loop (from button) ───────────────────────────────
+  if (data === "start_devloop") {
+    await ctx.answerCallbackQuery({ text: "🔁 Starting…" });
+    // Simulate the /devloop command
+    if (devLoop.isRunning()) {
+      await ctx.reply("<b>⏳ DevLoop already running.</b>", { parse_mode: "HTML" });
+    } else {
+      await ctx.reply("<i>Starting dev loop… Use /devloop for full details.</i>", { parse_mode: "HTML" });
+      if (ctx.chat) notifyChats.add(ctx.chat.id);
+      const chatId = ctx.chat?.id;
+      if (chatId) {
+        devLoop.onProgress = async (iter) => {
+          const lines: string[] = [];
+          lines.push(`<b>🔁 Iteration ${iter.iteration}</b> — L${iter.level} ${escapeHtml(iter.levelTitle)}`);
+          if (iter.pipelineScore !== null) lines.push(`Score: ${iter.pipelineScore}/25`);
+          if (iter.promotion) lines.push(`<b>🎉 PROMOTED to L${iter.promotion.toLevel}!</b>`);
+          try { await bot.api.sendMessage(chatId, lines.join("\n"), { parse_mode: "HTML" }); } catch { /* ignore */ }
+        };
+        devLoop.run().catch(() => {});
+      }
+    }
+    return;
+  }
+
+  // ── Show status (from button) ──────────────────────────────────
+  if (data === "show_status") {
+    await ctx.answerCallbackQuery({ text: "📊 Loading…" });
+    const promotion = orchestrator.getPromotion();
+    if (!promotion) {
+      await ctx.reply("<i>Promotion engine not enabled.</i>", { parse_mode: "HTML" });
+      return;
+    }
+    const stats = promotion.getStats();
+    const level = stats.currentLevel as PermissionLevel;
+    const title = LEVEL_TITLES[level];
+    const avgScore = stats.totalRuns > 0 ? Math.round((stats.totalScore / stats.totalRuns) * 10) / 10 : 0;
+    await ctx.reply(
+      `<b>🏆 L${level} — ${escapeHtml(title)}</b>\n` +
+        `Runs: ${stats.totalRuns} | Avg: ${avgScore}/25\n` +
+        `Deploys: ${stats.deployCount} | Self-Improves: ${stats.selfImproveCount}\n\n` +
+        `<i>Use /status for full details.</i>`,
+      { parse_mode: "HTML" }
+    );
     return;
   }
 
@@ -715,6 +967,41 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
     } catch {
       await ctx.reply("<i>Could not load details for this run.</i>", { parse_mode: "HTML" });
+    }
+    return;
+  }
+
+  // ── Deploy to GitHub ─────────────────────────────────────────────
+  if (data.startsWith("deploy:")) {
+    await ctx.answerCallbackQuery({ text: "🚀 Deploying…" });
+    const statusMsg = await ctx.reply("🚀 <i>Deploying project to GitHub…</i>", { parse_mode: "HTML" });
+
+    try {
+      const result = await deployer.deployFromWorkspace(WORKSPACE_ROOT);
+
+      try { if (ctx.chat) await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch { /* ignore */ }
+
+      if (result.success) {
+        await ctx.reply(
+          `<b>✅ Deployed to GitHub!</b>\n\n` +
+            `📦 <a href="${escapeHtml(result.repoUrl ?? "")}">${escapeHtml(result.repoUrl ?? "")}</a>\n` +
+            `📄 ${result.filesCount} files\n` +
+            `#️⃣ <code>${escapeHtml(result.commitHash ?? "")}</code>`,
+          { parse_mode: "HTML", link_preview_options: { is_disabled: true } }
+        );
+      } else {
+        await ctx.reply(
+          `<b>❌ Deploy Failed</b>\n\n<code>${escapeHtml(result.error ?? "Unknown error")}</code>`,
+          { parse_mode: "HTML" }
+        );
+      }
+    } catch (error) {
+      try { if (ctx.chat) await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch { /* ignore */ }
+      const msg = error instanceof Error ? error.message : String(error);
+      await ctx.reply(
+        `<b>❌ Deploy Failed</b>\n\n<code>${escapeHtml(msg)}</code>`,
+        { parse_mode: "HTML" }
+      );
     }
     return;
   }
@@ -798,6 +1085,8 @@ bot.on("message:text", async (ctx) => {
           .text("🔄 Run Again", `rerun:${rerunId}`)
           .text("🧬 Self-Improve", "trigger_improve")
           .row()
+          .text("🚀 Deploy to GitHub", `deploy:${result.runId}`)
+          .row()
           .text("📊 Score Details", `details:${result.runId}`)
           .text("❤️ Helpful", `feedback:good:${result.runId}`)          .text("👎 Not Helpful", `feedback:bad:${result.runId}`);
         await ctx.reply(chunks[i]!, { parse_mode: "HTML", reply_markup: actionKeyboard });
@@ -853,6 +1142,31 @@ bot.catch((err) => {
 // ── Launch ─────────────────────────────────────────────────────────
 async function main(): Promise<void> {
   await orchestrator.initialize();
+
+  // Register promotion listener for auto-notifications
+  const promotion = orchestrator.getPromotion();
+  if (promotion) {
+    const currentLevel = promotion.getLevel();
+    const currentTitle = promotion.getTitle();
+    console.log(`  Level: L${currentLevel} — ${currentTitle}`);
+
+    promotion.onPromotion((event) => {
+      const msg =
+        `<b>🎉🎉🎉 PROMOTION! 🎉🎉🎉</b>\n\n` +
+        `L${event.fromLevel} → <b>L${event.toLevel} — ${LEVEL_TITLES[event.toLevel as PermissionLevel]}</b>\n\n` +
+        `<b>Stats:</b>\n` +
+        `  Runs: ${event.stats.runs}\n` +
+        `  Avg Score: ${event.stats.avgScore}/25\n` +
+        `  Test Pass: ${Math.round(event.stats.testPassRate * 100)}%\n` +
+        `  Deploys: ${event.stats.deploys}\n` +
+        `  Self-Improves: ${event.stats.selfImproves}\n\n` +
+        `<i>${event.reason}</i>`;
+
+      for (const chatId of notifyChats) {
+        bot.api.sendMessage(chatId, msg, { parse_mode: "HTML" }).catch(() => {});
+      }
+    });
+  }
 
   console.log("═══════════════════════════════════════════════════════");
   console.log("  AgencyCore Telegram Bot");
