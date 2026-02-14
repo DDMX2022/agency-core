@@ -81,22 +81,15 @@ console.log('WebSocket server is running on ws://localhost:8080');
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
-  }
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "./dist"
+  },
+  "include": ["server.ts"],
+  "exclude": ["node_modules"]
 }
 ```
 
 ```bash
 # Install TypeScript and necessary types
-npm install typescript @types/node ws
-```
-
-```bash
-# Compile TypeScript to JavaScript
-npx tsc
-```
-
-```bash
-# Run the server
-node dist/server.js
+npm install typescript @types/ws
 ```

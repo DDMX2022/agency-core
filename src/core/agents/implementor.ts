@@ -45,7 +45,7 @@ export class Implementor {
         type: "createFile" as const,
         path: filePath,
         content,
-        requiresApproval: false,
+        requiresApproval: false, // No approval needed for createFile actions
         isDestructive: false,
       });
     }

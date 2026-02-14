@@ -1,15 +1,17 @@
 {
   "currentLevel": 1,
-  "totalRuns": 1,
-  "totalScore": 19,
+  "totalRuns": 3,
+  "totalScore": 56,
   "scores": [
+    19,
+    18,
     19
   ],
   "testsPassed": 0,
   "testsFailed": 0,
   "deployCount": 0,
-  "selfImproveCount": 0,
+  "selfImproveCount": 1,
   "promotionHistory": [],
   "createdAt": "2026-02-14T14:48:57.673Z",
-  "updatedAt": "2026-02-14T14:52:00.567Z"
+  "updatedAt": "2026-02-14T14:55:34.305Z"
 }

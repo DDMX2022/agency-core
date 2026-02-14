@@ -1,15 +1,14 @@
 ```typescript
 // server.ts
-
 import WebSocket, { WebSocketServer } from 'ws';
 
 const server = new WebSocketServer({ port: 8080 });
 
-server.on('connection', (socket: WebSocket) => {
+server.on('connection', (socket) => {
   console.log('A new client connected!');
 
   // Broadcast incoming messages to all clients
-  socket.on('message', (message: string) => {
+  socket.on('message', (message) => {
     console.log(`Received: ${message}`);
     server.clients.forEach((client) => {
       if (client !== socket && client.readyState === WebSocket.OPEN) {
@@ -29,7 +28,6 @@ console.log('WebSocket server is running on ws://localhost:8080');
 
 ```html
 <!-- client.html -->
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -63,8 +61,10 @@ console.log('WebSocket server is running on ws://localhost:8080');
 
         function sendMessage() {
             const input = document.getElementById('messageInput');
-            socket.send(input.value);
-            input.value = '';
+            if (input.value.trim() !== '') {
+                socket.send(input.value);
+                input.value = '';
+            }
         }
     </script>
 </body>
@@ -72,8 +72,29 @@ console.log('WebSocket server is running on ws://localhost:8080');
 ```
 
 ```json
-// tsconfig.json
+// package.json
+{
+  "name": "websocket-chat",
+  "version": "1.0.0",
+  "description": "A simple WebSocket chat server",
+  "main": "server.ts",
+  "scripts": {
+    "start": "ts-node server.ts"
+  },
+  "dependencies": {
+    "ws": "^8.0.0"
+  },
+  "devDependencies": {
+    "ts-node": "^10.0.0",
+    "typescript": "^4.0.0"
+  },
+  "author": "",
+  "license": "ISC"
+}
+```
 
+```json
+// tsconfig.json
 {
   "compilerOptions": {
     "target": "ES6",
@@ -84,19 +105,4 @@ console.log('WebSocket server is running on ws://localhost:8080');
     "forceConsistentCasingInFileNames": true
   }
 }
-```
-
-```bash
-# Install TypeScript and necessary types
-npm install typescript @types/node ws
-```
-
-```bash
-# Compile TypeScript to JavaScript
-npx tsc
-```
-
-```bash
-# Run the server
-node dist/server.js
 ```
